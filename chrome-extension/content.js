@@ -27,6 +27,42 @@ function wait(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// Safe click helper used in a few places to avoid CSP issues on links like <a href="javascript:...">
+// It was present earlier; restoring it so existing calls work.
+function safeClick(element) {
+    if (!element) return false;
+
+    try {
+        element.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+    } catch {
+        // ignore
+    }
+
+    const tag = (element.tagName || '').toUpperCase();
+    if (tag === 'A') {
+        const href = (element.getAttribute('href') || '').trim();
+        if (/^javascript:/i.test(href)) {
+            const preventDefaultNav = (e) => {
+                try {
+                    e.preventDefault();
+                } catch {
+                    // ignore
+                }
+            };
+            element.addEventListener('click', preventDefaultNav, { capture: true, once: true });
+        }
+    }
+
+    try {
+        element.focus?.();
+    } catch {
+        // ignore
+    }
+
+    element.click();
+    return true;
+}
+
 // Extract month name from date string (format: 'month/day/year')
 function getMonthNameFromDate(dateString) {
     if (!dateString) {
@@ -354,6 +390,55 @@ async function fillItem(values, n, itemNumber, firstName, amount) {
 async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId) {
     try {
         console.log(`Starting upload for Item #${itemNumber} with button ID: ${uploadButtonId}`);
+
+        const isVisible = (el) => {
+            if (!el) return false;
+            const s = window.getComputedStyle(el);
+            return s.display !== 'none' && s.visibility !== 'hidden' && el.offsetParent !== null;
+        };
+
+        const findBestDialogActionButton = (dialogEl) => {
+            if (!dialogEl) return null;
+            const buttons = Array.from(dialogEl.querySelectorAll('button, [role="button"], input[type="button"], input[type="submit"]'))
+                .filter(isVisible);
+            const score = (btn) => {
+                const raw = (btn.textContent || btn.value || '').trim().toUpperCase();
+                if (!raw) return 0;
+                // Prefer actions that imply submitting the upload.
+                if (raw.includes('UPLOAD')) return 5;
+                if (raw.includes('ATTACH')) return 4;
+                if (raw.includes('SAVE')) return 3;
+                if (raw === 'OK') return 2;
+                if (raw.includes('OK')) return 1;
+                return 0;
+            };
+            const sorted = buttons
+                .map((b) => ({ b, s: score(b) }))
+                .filter((x) => x.s > 0)
+                .sort((a, b) => b.s - a.s);
+            return sorted[0]?.b || null;
+        };
+
+        const attachmentAppearsNear = async (anchorEl, name) => {
+            const root =
+                anchorEl?.closest?.('[id*="fileUploadQuestion"], [class*="question"], .form-group, fieldset, tr, li, .row, .col') ||
+                anchorEl?.parentElement ||
+                document.body;
+
+            const nameUpper = (name || '').toUpperCase();
+
+            for (let i = 0; i < 20; i++) {
+                const text = (root.textContent || '').toUpperCase();
+                if (nameUpper && text.includes(nameUpper)) return true;
+
+                // Some UIs don't show full filename; check for any PDF-ish indicator appearing.
+                const anyPdfLink = root.querySelector?.('a[href*=".pdf"], a[download], a[href*="download"], [class*="uploaded"], [class*="attachment"], [class*="file"]');
+                if (anyPdfLink) return true;
+
+                await wait(250);
+            }
+            return false;
+        };
         
         // Convert base64 back to blob
         const byteCharacters = atob(base64Blob);
@@ -421,7 +506,7 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
         if (!uploadButton) {
             console.error(`Could not find upload button for Item #${itemNumber} with ID: ${uploadButtonId}`);
             console.error(`Available upload buttons on page:`, Array.from(document.querySelectorAll('[id*="fileUploadQuestion"]')).map(btn => btn.id));
-            return;
+            throw new Error(`Could not find upload button for Item #${itemNumber}`);
         }
         
         // If a previous upload dialog is still open (e.g. from last item), close it first
@@ -431,7 +516,7 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
             if (s.display === 'none' || s.visibility === 'hidden') continue;
             const okBtn = d.querySelector('.ui-dialog-buttonpane button, button');
             if (okBtn && (okBtn.textContent || '').trim().toUpperCase() === 'OK') {
-                okBtn.click();
+                safeClick(okBtn);
                 await wait(800);
                 break;
             }
@@ -472,6 +557,8 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
         //     await wait(1000); // Extra wait for items 2+
         // }
         
+        // Use a direct click here so we fully mimic a real user interaction.
+        // The CSP issue we fixed earlier was on the account SELECT link, not this upload button.
         uploadButton.click();
         await wait(2500); // Wait for upload dialog to open and load (longer for items 2+)
         
@@ -525,7 +612,7 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
             // Log all dialogs on the page for debugging
             const allDialogs = document.querySelectorAll('[class*="dialog"], [id*="dialog"], [role="dialog"]');
             console.log(`Found ${allDialogs.length} dialog-like elements on page:`, Array.from(allDialogs).map(d => ({ id: d.id, class: d.className, style: d.style.display })));
-            return;
+            throw new Error(`Upload dialog did not appear for Item #${itemNumber}`);
         }
         
         console.log(`Upload dialog found for Item #${itemNumber}, looking for file input...`);
@@ -640,7 +727,7 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
             
             if (!fileInput) {
                 console.error(`Could not find any file input for Item #${itemNumber}`);
-                return;
+                throw new Error(`Could not find file input in upload dialog for Item #${itemNumber}`);
             }
             
             if (fileInput) {
@@ -671,7 +758,7 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
                 if (fileInput.files && fileInput.files.length > 0) {
                     console.log(`File successfully set for Item #${itemNumber}: ${fileInput.files[0].name}`);
                 } else {
-                    console.warn(`File input has no files after setting for Item #${itemNumber}`);
+                    throw new Error(`File did not attach to file input for Item #${itemNumber}`);
                 }
                 
                 // Find and click OK button in the SPECIFIC dialog that contains this file input
@@ -749,6 +836,15 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
                         }
                     }
                 }
+
+                // Strategy 2b: If there isn't an explicit OK, try "UPLOAD"/"ATTACH"/"SAVE"
+                if (!okButton) {
+                    const bestAction = findBestDialogActionButton(dialogContainer || uploadDialog);
+                    if (bestAction) {
+                        okButton = bestAction;
+                        console.log(`Using dialog action button: ${(bestAction.textContent || bestAction.value || '').trim()}`);
+                    }
+                }
                 
                 // Strategy 3: Find the visible dialog that contains the file input
                 if (!okButton) {
@@ -781,7 +877,7 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
                 }
                 
                 if (okButton) {
-                    console.log(`Clicking OK button for Item #${itemNumber}`);
+                    console.log(`Clicking dialog action button for Item #${itemNumber}`);
                     
                     // Scroll OK button into view to ensure it's clickable
                     okButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -800,16 +896,15 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
                     okButton.dispatchEvent(clickEvent);
                     
                     // Also try the regular click
-                    okButton.click();
+                    safeClick(okButton);
                     
                     await wait(500);
                     
                     // Verify dialog is closing
+                    const dialogToCheck = dialogContainer || uploadDialog;
                     let dialogStillOpen = true;
                     for (let i = 0; i < 10; i++) {
-                        const dialogVisible = uploadDialog.offsetParent !== null && 
-                                            !uploadDialog.style.display.includes('none') &&
-                                            uploadDialog.style.visibility !== 'hidden';
+                        const dialogVisible = isVisible(dialogToCheck);
                         if (!dialogVisible) {
                             dialogStillOpen = false;
                             console.log(`Dialog closed for Item #${itemNumber} after ${i + 1} checks`);
@@ -820,7 +915,7 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
                     
                     if (dialogStillOpen) {
                         console.warn(`Dialog still appears open for Item #${itemNumber}, trying to close again...`);
-                        okButton.click();
+                        safeClick(okButton);
                         await wait(1000);
                     }
                     // Wait for dialog to be fully gone so the next item's upload doesn't conflict
@@ -833,6 +928,13 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
                         if (!anyVisible) break;
                         await wait(250);
                     }
+
+                    // Best-effort verification that something on the page reflects an attachment.
+                    const reflected = await attachmentAppearsNear(uploadButton, filename);
+                    if (!reflected) {
+                        throw new Error(`Upload dialog closed but no attachment indicator found for Item #${itemNumber}`);
+                    }
+
                     console.log(`Upload completed for Item #${itemNumber}`);
                 } else {
                     console.error(`Could not find OK button in upload dialog for Item #${itemNumber}`);
@@ -854,6 +956,16 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
                             class: b.className
                         })));
                     }
+                    // Try a broader action button search before failing.
+                    const best = findBestDialogActionButton(dialogContainer || uploadDialog);
+                    if (best) {
+                        console.warn(`Falling back to dialog action button: ${(best.textContent || best.value || '').trim()}`);
+                        safeClick(best);
+                        await wait(750);
+                        const reflected = await attachmentAppearsNear(uploadButton, filename);
+                        if (reflected) return;
+                    }
+                    throw new Error(`Could not find a usable dialog action button for Item #${itemNumber}`);
                 }
             } else {
                 // If no file input found, the dialog might use a different mechanism
@@ -882,7 +994,7 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
                         }
                     }
                     if (okButton) {
-                        okButton.click();
+                        safeClick(okButton);
                         await wait(1000);
                     }
                 }
@@ -918,7 +1030,7 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
                         }
                     }
                     if (okButton) {
-                        okButton.click();
+                        safeClick(okButton);
                         await wait(1000);
                     }
                 }
@@ -926,6 +1038,7 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
         }
     } catch (error) {
         console.error('Error uploading file:', error);
+        throw error;
     }
 }
 

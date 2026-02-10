@@ -36,34 +36,44 @@ function extractFileId(link) {
     throw new Error('Invalid Google Drive link format');
 }
 
-// Detect if blob is an image (by MIME or magic bytes). Google Drive may return generic types.
-function isImageBlob(blob) {
-    const t = (blob.type || '').toLowerCase();
-    if (t.startsWith('image/')) return true;
-    if (t === 'application/octet-stream' || !t) {
-        // Could be image; caller will try embedJpg/embedPng and catch
-        return true;
-    }
-    return false;
-}
+// Sniff file type by magic bytes (more reliable than blob.type for Google Drive downloads).
+function sniffFileKind(bytes) {
+    if (!bytes || bytes.length < 4) return 'unknown';
 
-// Detect if blob is PDF
-function isPdfBlob(blob) {
-    return (blob.type || '').toLowerCase() === 'application/pdf';
+    // PDF: 25 50 44 46 2D  => "%PDF-"
+    if (bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2D) {
+        return 'pdf';
+    }
+
+    // JPEG/JPG: FF D8 FF
+    if (bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) {
+        return 'jpg';
+    }
+
+    // PNG: 89 50 4E 47 0D 0A 1A 0A
+    if (
+        bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47 &&
+        bytes[4] === 0x0d && bytes[5] === 0x0a && bytes[6] === 0x1a && bytes[7] === 0x0a
+    ) {
+        return 'png';
+    }
+
+    return 'unknown';
 }
 
 // Convert image blob to a single-page PDF blob using pdf-lib
-async function convertImageToPdf(imageBlob) {
+async function convertImageToPdf(imageBlob, kindHint = 'unknown') {
     const bytes = new Uint8Array(await imageBlob.arrayBuffer());
     const mime = (imageBlob.type || '').toLowerCase();
+    const kind = kindHint !== 'unknown' ? kindHint : sniffFileKind(bytes);
 
     const pdfDoc = await PDFDocument.create();
     let image;
 
     // JPEG / JPG (image/jpeg or image/jpg; Google Drive may use either)
-    if (mime === 'image/jpeg' || mime === 'image/jpg' || mime === 'image/jpe') {
+    if (kind === 'jpg' || mime === 'image/jpeg' || mime === 'image/jpg' || mime === 'image/jpe') {
         image = await pdfDoc.embedJpg(bytes);
-    } else if (mime === 'image/png') {
+    } else if (kind === 'png' || mime === 'image/png') {
         image = await pdfDoc.embedPng(bytes);
     } else {
         // Try JPEG first (common for .jpg), then PNG
@@ -100,17 +110,30 @@ async function combinePdfs(blobs, _filename) {
     const mergedDoc = await PDFDocument.create();
 
     for (const blob of blobs) {
-        let pdfBlob = blob;
-        if (!isPdfBlob(blob)) {
-            if (isImageBlob(blob)) {
-                pdfBlob = await convertImageToPdf(blob);
+        // Read bytes once, then decide how to handle.
+        const bytes = new Uint8Array(await blob.arrayBuffer());
+        const kind = sniffFileKind(bytes);
+
+        let pdfBytes;
+        if (kind === 'pdf') {
+            pdfBytes = bytes;
+        } else if (kind === 'jpg' || kind === 'png') {
+            const pdfBlob = await convertImageToPdf(new Blob([bytes], { type: blob.type || '' }), kind);
+            pdfBytes = new Uint8Array(await pdfBlob.arrayBuffer());
+        } else {
+            // Fall back to MIME if magic bytes unknown (sometimes headers are stripped, but MIME is set).
+            const t = (blob.type || '').toLowerCase();
+            if (t === 'application/pdf') {
+                pdfBytes = bytes;
+            } else if (t === 'image/jpeg' || t === 'image/jpg' || t === 'image/jpe' || t === 'image/png') {
+                const pdfBlob = await convertImageToPdf(new Blob([bytes], { type: t }), t.includes('png') ? 'png' : 'jpg');
+                pdfBytes = new Uint8Array(await pdfBlob.arrayBuffer());
             } else {
-                throw new Error(`Unsupported file type: ${blob.type || 'unknown'}. Use PDF, JPEG, or PNG.`);
+                throw new Error(`Unsupported file type. Use PDF, PNG, JPEG, or JPG.`);
             }
         }
 
-        const bytes = await pdfBlob.arrayBuffer();
-        const srcDoc = await PDFDocument.load(bytes);
+        const srcDoc = await PDFDocument.load(pdfBytes);
         const pageCount = srcDoc.getPageCount();
         const copiedPages = await mergedDoc.copyPages(srcDoc, Array.from({ length: pageCount }, (_, i) => i));
         copiedPages.forEach(p => mergedDoc.addPage(p));
