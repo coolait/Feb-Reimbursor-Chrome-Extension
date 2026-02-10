@@ -49,6 +49,32 @@ function refreshLastPdfSection() {
     });
 }
 
+// Show list of all files combined/uploaded in this browser session
+function refreshUploadedListSection() {
+    chrome.runtime.sendMessage({ action: 'getCombinedList' }, (list) => {
+        const section = document.getElementById('uploadedListSection');
+        const listEl = document.getElementById('uploadedList');
+        const emptyEl = document.getElementById('uploadedListEmpty');
+
+        if (!Array.isArray(list) || list.length === 0) {
+            section.style.display = 'none';
+            listEl.innerHTML = '';
+            emptyEl.style.display = 'block';
+            return;
+        }
+
+        section.style.display = 'block';
+        listEl.innerHTML = '';
+        emptyEl.style.display = 'none';
+
+        list.forEach((item, idx) => {
+            const li = document.createElement('li');
+            li.textContent = `${idx + 1}. ${item.filename || 'combined.pdf'}`;
+            listEl.appendChild(li);
+        });
+    });
+}
+
 // Show status message
 function showStatus(message, type = 'info') {
     const statusDiv = document.getElementById('status');
@@ -158,6 +184,7 @@ document.getElementById('processBtn').addEventListener('click', async () => {
                 if (response && response.success) {
                     showStatus(response.message || 'Subject field filled successfully!', 'success');
                     refreshLastPdfSection();
+                    refreshUploadedListSection();
                 } else {
                     showStatus(response?.error || 'Failed to fill Subject field', 'error');
                 }
@@ -202,6 +229,7 @@ document.getElementById('testCombinerBtn').addEventListener('click', async () =>
 
 // Show last PDF section on popup open
 refreshLastPdfSection();
+refreshUploadedListSection();
 
 // View last combined PDF in extension tab
 document.getElementById('viewPdfBtn').addEventListener('click', () => {

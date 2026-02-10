@@ -134,6 +134,11 @@
             <button type="button" id="downloadPdfBtn">Download</button>
         </div>
     </div>
+    <div id="uploadedListSection" class="last-pdf" style="display: none; margin-top: 8px;">
+        <h2>Files uploaded this session</h2>
+        <div class="filename" id="uploadedListEmpty">No files uploaded yet.</div>
+        <ul id="uploadedList" style="max-height: 120px; overflow-y: auto; padding-left: 16px; margin: 4px 0 0 0; font-size: 11px; color: #444;"></ul>
+    </div>
     <div id="status"></div>
     
     <script src="popup.js"></script>

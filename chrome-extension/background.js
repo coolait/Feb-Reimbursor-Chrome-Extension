@@ -151,6 +151,12 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
             .catch(error => sendResponse({ success: false, error: error.message }));
         return true;
     }
+    if (request.action === 'getCombinedList') {
+        chrome.storage.session.get('combinedList').then((data) => {
+            sendResponse(Array.isArray(data.combinedList) ? data.combinedList : []);
+        });
+        return true;
+    }
     if (request.action === 'testFileCombiner') {
         runFileCombinerTest()
             .then(result => sendResponse(result))
@@ -211,9 +217,30 @@ async function handleFileCombination(link1, link2, filename) {
             reader.readAsDataURL(combinedBlob);
         });
 
-        // Store for viewing/downloading in popup and viewer page
+        // Store for viewing/downloading in popup and viewer page.
+        // Also keep a small list of recent combined files (filenames only) so the popup
+        // can show everything that was generated in this browser session.
+        const entry = {
+            base64,
+            filename,
+            mimeType: 'application/pdf'
+        };
+
+        const existing = await chrome.storage.session.get(['combinedList']);
+        let combinedList = Array.isArray(existing.combinedList) ? existing.combinedList : [];
+        combinedList.push({
+            filename,
+            mimeType: 'application/pdf',
+            createdAt: Date.now()
+        });
+        // Keep only the most recent 20 to avoid unbounded growth
+        if (combinedList.length > 20) {
+            combinedList = combinedList.slice(combinedList.length - 20);
+        }
+
         await chrome.storage.session.set({
-            lastCombinedPdf: { base64, filename, mimeType: 'application/pdf' }
+            lastCombinedPdf: entry,
+            combinedList
         });
 
         return {
