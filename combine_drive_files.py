@@ -94,18 +94,16 @@ def image_to_pdf(image_path, output_pdf_path):
 def combine_pdfs(pdf_paths, output_path):
     """
     Combine multiple PDF files into one.
-    
-    Args:
-        pdf_paths: List of paths to PDF files
-        output_path: Path to save the combined PDF
+    Decrypts with empty password when needed (e.g. bank statement PDFs).
     """
     print(f"Combining {len(pdf_paths)} PDF files...")
     pdf_merger = PyPDF2.PdfMerger()
-    
     for pdf_path in pdf_paths:
         print(f"  Adding: {pdf_path}")
-        pdf_merger.append(pdf_path)
-    
+        reader = PyPDF2.PdfReader(pdf_path)
+        if getattr(reader, 'is_encrypted', False):
+            reader.decrypt("")
+        pdf_merger.append(reader)
     pdf_merger.write(output_path)
     pdf_merger.close()
     print(f"Combined PDF saved to: {output_path}")

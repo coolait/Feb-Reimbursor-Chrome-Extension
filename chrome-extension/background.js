@@ -4,26 +4,41 @@ importScripts('lib/pdf-lib.min.js');
 
 const { PDFDocument } = self.PDFLib;
 
-// Download file from Google Drive
+// Set to your deployed combiner server URL (e.g. https://your-app.onrender.com) to support encrypted PDFs.
+// Leave empty to use in-browser combining only.
+const COMBINER_SERVER_URL = 'https://feb-reimbursor-chrome-extension.onrender.com';
+
+// Download from Google Drive — mirrors combine_drive_files.py (direct URL, then confirm=t for virus scan).
 async function downloadFromGoogleDrive(fileId) {
-    try {
-        const url = `https://drive.google.com/uc?export=download&id=${fileId}`;
-        const response = await fetch(url);
+    const urlsToTry = [
+        `https://drive.google.com/uc?export=download&id=${fileId}`,
+        `https://drive.google.com/uc?export=download&confirm=t&id=${fileId}`,
+        `https://drive.google.com/uc?id=${fileId}&export=download`
+    ];
 
-        if (!response.ok) {
-            throw new Error(`Failed to download: ${response.statusText}`);
+    for (let i = 0; i < urlsToTry.length; i++) {
+        try {
+            const response = await fetch(urlsToTry[i], { redirect: 'follow' });
+            if (!response.ok) continue;
+
+            const contentType = (response.headers.get('Content-Type') || '').toLowerCase();
+            if (contentType.includes('text/html')) continue;
+
+            const blob = await response.blob();
+            if (blob.size === 0) continue;
+
+            const head = new Uint8Array(await blob.slice(0, Math.min(1024, blob.size)).arrayBuffer());
+            const headStr = String.fromCharCode(...head.slice(0, Math.min(64, head.length))).toLowerCase();
+            if (headStr.startsWith('<!doctype') || headStr.startsWith('<html') || headStr.startsWith('<?xml')) continue;
+
+            if (sniffFileKindLoose(head) === 'unknown') continue;
+
+            return blob;
+        } catch (e) {
+            if (e.message && e.message.includes('authentication')) throw e;
         }
-
-        const contentType = response.headers.get('Content-Type') || '';
-        if (contentType.includes('text/html')) {
-            throw new Error('File requires authentication. Please make the file publicly accessible.');
-        }
-
-        const blob = await response.blob();
-        return blob;
-    } catch (error) {
-        throw new Error(`Download failed: ${error.message}`);
     }
+    throw new Error(`Download failed for ${fileId}. Make the file publicly accessible (Anyone with the link) and try again.`);
 }
 
 // Extract file ID from Google Drive link
@@ -58,6 +73,17 @@ function sniffFileKind(bytes) {
         return 'png';
     }
 
+    return 'unknown';
+}
+
+// Like Python: detect by magic bytes at start (and PDF anywhere in first 1KB for Drive quirks).
+function sniffFileKindLoose(bytes) {
+    if (!bytes || bytes.length < 4) return 'unknown';
+    if (sniffFileKind(bytes) !== 'unknown') return sniffFileKind(bytes);
+    for (let i = 0; i + 5 <= Math.min(bytes.length, 1024); i++) {
+        if (bytes[i] === 0x25 && bytes[i + 1] === 0x50 && bytes[i + 2] === 0x44 && bytes[i + 3] === 0x46 && bytes[i + 4] === 0x2d)
+            return 'pdf';
+    }
     return 'unknown';
 }
 
@@ -101,42 +127,65 @@ async function convertImageToPdf(imageBlob, kindHint = 'unknown') {
     return new Blob([pdfBytes], { type: 'application/pdf' });
 }
 
-// Combine multiple PDF blobs (and optionally image blobs converted to PDF) into one PDF
+// File combiner: same behavior as combine_drive_files.py
+// 1) Detect type by magic bytes (PDF, PNG, JPEG/JPG). 2) Convert images to one-page PDFs.
+// 3) Merge all PDFs in order (first link = receipt, second = statement) via pdf-lib.
+// No raw concatenation, no ignoreEncryption — so both documents always show. If a PDF is
+// password-protected, we throw a clear error (user can re-save without password and retry).
+function blobToBytes(blob) {
+    return blob.arrayBuffer().then((ab) => new Uint8Array(ab));
+}
+
 async function combinePdfs(blobs, _filename) {
-    if (blobs.length === 0) {
-        throw new Error('No files to combine');
-    }
+    if (!blobs || blobs.length === 0) throw new Error('No files to combine');
 
     const mergedDoc = await PDFDocument.create();
 
-    for (const blob of blobs) {
-        // Read bytes once, then decide how to handle.
-        const bytes = new Uint8Array(await blob.arrayBuffer());
-        const kind = sniffFileKind(bytes);
+    for (let i = 0; i < blobs.length; i++) {
+        const fileNum = i + 1;
+        const bytes = await blobToBytes(blobs[i]);
+        if (bytes.length === 0) throw new Error(`File ${fileNum} is empty.`);
 
+        const kind = sniffFileKindLoose(bytes);
         let pdfBytes;
+
         if (kind === 'pdf') {
             pdfBytes = bytes;
         } else if (kind === 'jpg' || kind === 'png') {
-            const pdfBlob = await convertImageToPdf(new Blob([bytes], { type: blob.type || '' }), kind);
+            const imageBlob = new Blob([bytes], { type: blobs[i].type || (kind === 'png' ? 'image/png' : 'image/jpeg') });
+            const pdfBlob = await convertImageToPdf(imageBlob, kind);
             pdfBytes = new Uint8Array(await pdfBlob.arrayBuffer());
         } else {
-            // Fall back to MIME if magic bytes unknown (sometimes headers are stripped, but MIME is set).
-            const t = (blob.type || '').toLowerCase();
-            if (t === 'application/pdf') {
-                pdfBytes = bytes;
-            } else if (t === 'image/jpeg' || t === 'image/jpg' || t === 'image/jpe' || t === 'image/png') {
-                const pdfBlob = await convertImageToPdf(new Blob([bytes], { type: t }), t.includes('png') ? 'png' : 'jpg');
+            const t = (blobs[i].type || '').toLowerCase();
+            if (t === 'application/pdf') pdfBytes = bytes;
+            else if (t === 'image/jpeg' || t === 'image/jpg' || t === 'image/jpe' || t === 'image/png') {
+                const imageBlob = new Blob([bytes], { type: t });
+                const pdfBlob = await convertImageToPdf(imageBlob, t.includes('png') ? 'png' : 'jpg');
                 pdfBytes = new Uint8Array(await pdfBlob.arrayBuffer());
             } else {
-                throw new Error(`Unsupported file type. Use PDF, PNG, JPEG, or JPG.`);
+                throw new Error(`File ${fileNum}: Unsupported type (use PDF, PNG, JPEG, or JPG).`);
             }
         }
 
-        const srcDoc = await PDFDocument.load(pdfBytes);
+        // Load PDF without ignoreEncryption so we get real content. If we used ignoreEncryption we'd get blank pages.
+        let srcDoc;
+        try {
+            srcDoc = await PDFDocument.load(pdfBytes);
+        } catch (e) {
+            const msg = (e && e.message) ? e.message : String(e);
+            if (/encrypted|password/i.test(msg)) {
+                throw new Error(
+                    `File ${fileNum} is encrypted or password-protected; the extension can't decrypt PDFs in the browser. ` +
+                    `Fix: Re-save the file (e.g. Open → Print → "Save as PDF") and use that link, or use the project's Python script combine_drive_files.py to combine (it can decrypt with empty password).`
+                );
+            }
+            throw e;
+        }
+
         const pageCount = srcDoc.getPageCount();
-        const copiedPages = await mergedDoc.copyPages(srcDoc, Array.from({ length: pageCount }, (_, i) => i));
-        copiedPages.forEach(p => mergedDoc.addPage(p));
+        if (pageCount === 0) throw new Error(`File ${fileNum} has no pages.`);
+        const copiedPages = await mergedDoc.copyPages(srcDoc, Array.from({ length: pageCount }, (_, j) => j));
+        copiedPages.forEach((p) => mergedDoc.addPage(p));
     }
 
     const mergedBytes = await mergedDoc.save();
@@ -191,20 +240,64 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         });
         return true;
     }
+    if (request.action === 'downloadCombinedByIndex') {
+        const index = request.index;
+        chrome.storage.session.get('combinedList').then((data) => {
+            const list = Array.isArray(data.combinedList) ? data.combinedList : [];
+            const item = list[index];
+            if (!item || item.base64 == null || !item.filename) {
+                sendResponse({ success: false, error: 'File not found' });
+                return;
+            }
+            const dataUrl = `data:application/pdf;base64,${item.base64}`;
+            chrome.downloads.download({
+                url: dataUrl,
+                filename: item.filename,
+                saveAs: true
+            }, () => {
+                if (chrome.runtime.lastError) {
+                    sendResponse({ success: false, error: chrome.runtime.lastError.message });
+                } else {
+                    sendResponse({ success: true });
+                }
+            });
+        });
+        return true;
+    }
 });
+
+// Try hosted Python server (handles encrypted PDFs). Returns blob or null.
+async function tryHostedCombiner(link1, link2, filename) {
+    if (!COMBINER_SERVER_URL || !COMBINER_SERVER_URL.trim()) return null;
+    const base = COMBINER_SERVER_URL.replace(/\/$/, '');
+    try {
+        const res = await fetch(`${base}/combine`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ link1, link2, filename })
+        });
+        if (!res.ok) return null;
+        const ct = (res.headers.get('Content-Type') || '').toLowerCase();
+        if (!ct.includes('pdf')) return null;
+        return await res.blob();
+    } catch (_) {
+        return null;
+    }
+}
 
 // Handle file combination from Google Drive links
 async function handleFileCombination(link1, link2, filename) {
     try {
-        const fileId1 = extractFileId(link1);
-        const fileId2 = extractFileId(link2);
-
-        const [blob1, blob2] = await Promise.all([
-            downloadFromGoogleDrive(fileId1),
-            downloadFromGoogleDrive(fileId2)
-        ]);
-
-        const combinedBlob = await combinePdfs([blob1, blob2], filename);
+        let combinedBlob = await tryHostedCombiner(link1, link2, filename);
+        if (!combinedBlob) {
+            const fileId1 = extractFileId(link1);
+            const fileId2 = extractFileId(link2);
+            const [blob1, blob2] = await Promise.all([
+                downloadFromGoogleDrive(fileId1),
+                downloadFromGoogleDrive(fileId2)
+            ]);
+            combinedBlob = await combinePdfs([blob1, blob2], filename);
+        }
 
         const base64 = await new Promise((resolve, reject) => {
             const reader = new FileReader();
@@ -218,8 +311,7 @@ async function handleFileCombination(link1, link2, filename) {
         });
 
         // Store for viewing/downloading in popup and viewer page.
-        // Also keep a small list of recent combined files (filenames only) so the popup
-        // can show everything that was generated in this browser session.
+        // Keep a list of recent combined files WITH base64 so user can download any of them.
         const entry = {
             base64,
             filename,
@@ -230,12 +322,13 @@ async function handleFileCombination(link1, link2, filename) {
         let combinedList = Array.isArray(existing.combinedList) ? existing.combinedList : [];
         combinedList.push({
             filename,
+            base64,
             mimeType: 'application/pdf',
             createdAt: Date.now()
         });
-        // Keep only the most recent 20 to avoid unbounded growth
-        if (combinedList.length > 20) {
-            combinedList = combinedList.slice(combinedList.length - 20);
+        // Keep only the most recent 10 to avoid session storage limits
+        if (combinedList.length > 10) {
+            combinedList = combinedList.slice(combinedList.length - 10);
         }
 
         await chrome.storage.session.set({

@@ -49,7 +49,7 @@ function refreshLastPdfSection() {
     });
 }
 
-// Show list of all files combined/uploaded in this browser session
+// Show list of all files combined/uploaded in this browser session (each with Download)
 function refreshUploadedListSection() {
     chrome.runtime.sendMessage({ action: 'getCombinedList' }, (list) => {
         const section = document.getElementById('uploadedListSection');
@@ -69,7 +69,30 @@ function refreshUploadedListSection() {
 
         list.forEach((item, idx) => {
             const li = document.createElement('li');
-            li.textContent = `${idx + 1}. ${item.filename || 'combined.pdf'}`;
+            li.style.marginBottom = '6px';
+            const name = document.createElement('span');
+            name.textContent = (item.filename || 'combined.pdf');
+            name.style.marginRight = '8px';
+            name.title = item.filename || '';
+            const downloadBtn = document.createElement('button');
+            downloadBtn.textContent = 'Download';
+            downloadBtn.type = 'button';
+            downloadBtn.style.marginTop = '0';
+            downloadBtn.style.padding = '4px 8px';
+            downloadBtn.style.fontSize = '11px';
+            downloadBtn.style.background = '#607D8B';
+            downloadBtn.style.flex = 'none';
+            downloadBtn.addEventListener('click', () => {
+                chrome.runtime.sendMessage({ action: 'downloadCombinedByIndex', index: idx }, (res) => {
+                    if (res && res.success) {
+                        showStatus('Download started: ' + (item.filename || 'file'), 'success');
+                    } else {
+                        showStatus(res?.error || 'Download failed', 'error');
+                    }
+                });
+            });
+            li.appendChild(name);
+            li.appendChild(downloadBtn);
             listEl.appendChild(li);
         });
     });
