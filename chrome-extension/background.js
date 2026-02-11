@@ -378,6 +378,6 @@ async function runFileCombinerTest() {
         return {
             success: false,
             error: `File combiner test failed: ${error.message}`
-        };
+        }
     }
 }
