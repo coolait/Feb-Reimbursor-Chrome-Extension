@@ -733,57 +733,69 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
             if (fileInput) {
                 console.log(`Found file input for Item #${itemNumber}, setting file...`);
                 
-                // IMPORTANT: Clear the file input first since it's reused across items
-                // Reset the file input to ensure we're starting fresh
-                fileInput.value = '';
-                await wait(200);
-                
-                // Create a File object from the blob
+                // Create a File object from the blob (single file only)
                 const file = new File([blob], filename, { type: 'application/pdf' });
-                
-                // Create a DataTransfer object to set files
                 const dataTransfer = new DataTransfer();
                 dataTransfer.items.add(file);
                 fileInput.files = dataTransfer.files;
-                
-                // Trigger change event
-                console.log(`Dispatching change event for file input...`);
+                // Trigger once so the form sees one file (avoid duplicate uploads from change + input)
                 fileInput.dispatchEvent(new Event('change', { bubbles: true }));
-                fileInput.dispatchEvent(new Event('input', { bubbles: true }));
-                
-                // Wait a bit longer to ensure the file is processed
-                await wait(2000);
-                
-                // Verify file was set (log only; don't hard-fail here since the site may handle this differently)
-                if (fileInput.files && fileInput.files.length > 0) {
-                    console.log(`File successfully set for Item #${itemNumber}: ${fileInput.files[0].name}`);
-                } else {
-                    console.warn(`File input has no files after setting for Item #${itemNumber}`);
-                }
-                
-                // Find and click OK button in the SPECIFIC dialog that contains this file input
-                // CRITICAL: We need to find the dialog that contains the file input we just set,
-                // not just any dialog, because there are multiple dialogs in the DOM
-                console.log(`Looking for OK button in dialog for Item #${itemNumber}...`);
-                let okButton = null;
-                
-                // Strategy 1: Find the dialog container that contains the file input
-                // Walk up the DOM tree from the file input to find the dialog
+
+                // Resolve dialog container now so we can wait for "file ready" inside it
                 let dialogContainer = fileInput.closest('.ui-dialog');
                 if (!dialogContainer) {
-                    // Try finding parent with dialog classes
                     let parent = fileInput.parentElement;
                     while (parent && parent !== document.body) {
-                        if (parent.classList.contains('ui-dialog') || 
-                            parent.classList.contains('uploadFileDialog') ||
-                            parent.getAttribute('role') === 'dialog') {
+                        if (parent.classList.contains('ui-dialog') || parent.classList.contains('uploadFileDialog') || parent.getAttribute('role') === 'dialog') {
                             dialogContainer = parent;
                             break;
                         }
                         parent = parent.parentElement;
                     }
                 }
+                const dialogToPoll = dialogContainer || uploadDialog;
+
+                // Wait until the page shows the file in the dialog (avoids clicking OK too early and getting "put in a file" error)
+                const fileReady = (el) => {
+                    if (!el) return false;
+                    const text = (el.textContent || '').toLowerCase();
+                    const hasFilename = filename && text.includes(filename.toLowerCase());
+                    const hasPdf = text.includes('.pdf') || el.querySelector?.('a[href*=".pdf"], [class*="uploaded"], [class*="attachment"], [class*="filename"]');
+                    return hasFilename || !!hasPdf;
+                };
+                console.log(`Waiting for file to appear in dialog for Item #${itemNumber}...`);
+                const maxWaitMs = 12000;
+                const stepMs = 250;
+                let fileShown = false;
+                for (let elapsed = 0; elapsed < maxWaitMs; elapsed += stepMs) {
+                    if (fileReady(dialogToPoll)) {
+                        fileShown = true;
+                        console.log(`File visible in dialog for Item #${itemNumber} after ${elapsed}ms`);
+                        break;
+                    }
+                    await wait(stepMs);
+                }
+                if (!fileShown) {
+                    console.warn(`File may not be visible in dialog for Item #${itemNumber}, waiting extra 2s before OK...`);
+                    await wait(2000);
+                }
                 
+                // Find and click OK button in the SPECIFIC dialog that contains this file input
+                console.log(`Looking for OK button in dialog for Item #${itemNumber}...`);
+                let okButton = null;
+                if (!dialogContainer) {
+                    dialogContainer = fileInput.closest('.ui-dialog');
+                    if (!dialogContainer) {
+                        let parent = fileInput.parentElement;
+                        while (parent && parent !== document.body) {
+                            if (parent.classList.contains('ui-dialog') || parent.classList.contains('uploadFileDialog') || parent.getAttribute('role') === 'dialog') {
+                                dialogContainer = parent;
+                                break;
+                            }
+                            parent = parent.parentElement;
+                        }
+                    }
+                }
                 // If we found the dialog container, search for OK button within it
                 if (dialogContainer) {
                     console.log(`Found dialog container for Item #${itemNumber}, searching for OK button...`);
@@ -878,26 +890,12 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
                 
                 if (okButton) {
                     console.log(`Clicking dialog action button for Item #${itemNumber}`);
-                    
-                    // Scroll OK button into view to ensure it's clickable
                     okButton.scrollIntoView({ behavior: 'smooth', block: 'center' });
                     await wait(300);
-                    
-                    // Try multiple click methods to ensure it registers
                     okButton.focus();
                     await wait(100);
-                    
-                    // Click using mouse event (more reliable than .click() sometimes)
-                    const clickEvent = new MouseEvent('click', {
-                        bubbles: true,
-                        cancelable: true,
-                        view: window
-                    });
-                    okButton.dispatchEvent(clickEvent);
-                    
-                    // Also try the regular click
-                    safeClick(okButton);
-                    
+                    // Single click only (double-click was causing multiple/blank uploads)
+                    okButton.click();
                     await wait(500);
                     
                     // Verify dialog is closing
@@ -914,9 +912,8 @@ async function uploadFileToItem(itemNumber, base64Blob, filename, uploadButtonId
                     }
                     
                     if (dialogStillOpen) {
-                        console.warn(`Dialog still appears open for Item #${itemNumber}, trying to close again...`);
-                        safeClick(okButton);
-                        await wait(1000);
+                        console.warn(`Dialog still appears open for Item #${itemNumber}, waiting for it to close...`);
+                        await wait(2000);
                     }
                     // Wait for dialog to be fully gone so the next item's upload doesn't conflict
                     for (let i = 0; i < 20; i++) {
