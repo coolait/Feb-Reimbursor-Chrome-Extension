@@ -70,29 +70,41 @@ function refreshUploadedListSection() {
         list.forEach((item, idx) => {
             const li = document.createElement('li');
             li.style.marginBottom = '6px';
+            const label = item.itemNumber != null
+                ? `Item ${item.itemNumber}: ${item.filename || 'combined.pdf'}`
+                : (item.filename || 'combined.pdf');
             const name = document.createElement('span');
-            name.textContent = (item.filename || 'combined.pdf');
+            name.textContent = label;
             name.style.marginRight = '8px';
             name.title = item.filename || '';
-            const downloadBtn = document.createElement('button');
-            downloadBtn.textContent = 'Download';
-            downloadBtn.type = 'button';
-            downloadBtn.style.marginTop = '0';
-            downloadBtn.style.padding = '4px 8px';
-            downloadBtn.style.fontSize = '11px';
-            downloadBtn.style.background = '#607D8B';
-            downloadBtn.style.flex = 'none';
-            downloadBtn.addEventListener('click', () => {
-                chrome.runtime.sendMessage({ action: 'downloadCombinedByIndex', index: idx }, (res) => {
-                    if (res && res.success) {
-                        showStatus('Download started: ' + (item.filename || 'file'), 'success');
-                    } else {
-                        showStatus(res?.error || 'Download failed', 'error');
-                    }
-                });
-            });
             li.appendChild(name);
-            li.appendChild(downloadBtn);
+            const hasBase64 = item.base64 != null && item.base64 !== '';
+            if (hasBase64) {
+                const downloadBtn = document.createElement('button');
+                downloadBtn.textContent = 'Download';
+                downloadBtn.type = 'button';
+                downloadBtn.style.marginTop = '0';
+                downloadBtn.style.padding = '4px 8px';
+                downloadBtn.style.fontSize = '11px';
+                downloadBtn.style.background = '#607D8B';
+                downloadBtn.style.flex = 'none';
+                downloadBtn.addEventListener('click', () => {
+                    chrome.runtime.sendMessage({ action: 'downloadCombinedByIndex', index: idx }, (res) => {
+                        if (res && res.success) {
+                            showStatus('Download started: ' + (item.filename || 'file'), 'success');
+                        } else {
+                            showStatus(res?.error || 'Download failed', 'error');
+                        }
+                    });
+                });
+                li.appendChild(downloadBtn);
+            } else {
+                const hint = document.createElement('span');
+                hint.textContent = '(list only)';
+                hint.style.fontSize = '10px';
+                hint.style.color = '#888';
+                li.appendChild(hint);
+            }
             listEl.appendChild(li);
         });
     });

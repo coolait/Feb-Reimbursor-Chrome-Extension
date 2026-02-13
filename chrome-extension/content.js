@@ -352,7 +352,8 @@ async function fillItem(values, n, itemNumber, firstName, amount) {
                         action: 'combineFiles',
                         link1: link1,
                         link2: link2,
-                        filename: output_filename
+                        filename: output_filename,
+                        itemNumber: itemNumber
                     }, (response) => {
                         if (chrome.runtime.lastError) {
                             reject(new Error(chrome.runtime.lastError.message));
@@ -1229,11 +1230,15 @@ async function fillForm(values) {
         }
         
         // Process multiple items using while loop (like Python script)
-        // Start with n=17, check if n==17 or getValue(n) == "Yes"
+        // Clear uploaded-PDF list so popup shows only PDFs from this run
+        try {
+            await new Promise((resolve) => {
+                chrome.runtime.sendMessage({ action: 'clearCombinedListForNewRun' }, () => { resolve(); });
+            });
+        } catch (_) {}
         let n = 17;
         let itemNumber = 1;
         const processedItems = [];
-        
         while (true) {
             if (itemNumber > 6) break; // Max 6 items (form only has 6 item slots)
             const shouldProcess = (n === 17) || (getValue(values, n) === "Yes");

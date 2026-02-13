@@ -195,9 +195,13 @@ async function combinePdfs(blobs, _filename) {
 // Listen for messages
 chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
     if (request.action === 'combineFiles') {
-        handleFileCombination(request.link1, request.link2, request.filename)
+        handleFileCombination(request.link1, request.link2, request.filename, request.itemNumber)
             .then(result => sendResponse(result))
             .catch(error => sendResponse({ success: false, error: error.message }));
+        return true;
+    }
+    if (request.action === 'clearCombinedListForNewRun') {
+        chrome.storage.session.set({ combinedList: [], lastCombinedPdf: null }).then(() => sendResponse({ ok: true }));
         return true;
     }
     if (request.action === 'getCombinedList') {
@@ -245,8 +249,12 @@ chrome.runtime.onMessage.addListener((request, _sender, sendResponse) => {
         chrome.storage.session.get('combinedList').then((data) => {
             const list = Array.isArray(data.combinedList) ? data.combinedList : [];
             const item = list[index];
-            if (!item || item.base64 == null || !item.filename) {
+            if (!item || !item.filename) {
                 sendResponse({ success: false, error: 'File not found' });
+                return;
+            }
+            if (item.base64 == null || item.base64 === '') {
+                sendResponse({ success: false, error: 'PDF not stored (storage limit). Upload succeeded; list-only entry.' });
                 return;
             }
             const dataUrl = `data:application/pdf;base64,${item.base64}`;
@@ -286,7 +294,7 @@ async function tryHostedCombiner(link1, link2, filename) {
 }
 
 // Handle file combination from Google Drive links
-async function handleFileCombination(link1, link2, filename) {
+async function handleFileCombination(link1, link2, filename, itemNumber) {
     try {
         let combinedBlob = await tryHostedCombiner(link1, link2, filename);
         if (!combinedBlob) {
@@ -310,18 +318,28 @@ async function handleFileCombination(link1, link2, filename) {
             reader.readAsDataURL(combinedBlob);
         });
 
-        // Store for viewing/downloading in popup (best-effort; don't fail combine if quota exceeded)
         const entry = { base64, filename, mimeType: 'application/pdf' };
+        const newEntry = { filename, base64, mimeType: 'application/pdf', itemNumber: itemNumber ?? null, createdAt: Date.now() };
         try {
             const existing = await chrome.storage.session.get(['combinedList']);
             let combinedList = Array.isArray(existing.combinedList) ? existing.combinedList : [];
-            combinedList.push({ filename, base64, mimeType: 'application/pdf', createdAt: Date.now() });
-            if (combinedList.length > 2) {
-                combinedList = combinedList.slice(-2);
-            }
+            combinedList.push(newEntry);
+            if (combinedList.length > 6) combinedList = combinedList.slice(-6);
             await chrome.storage.session.set({ lastCombinedPdf: entry, combinedList });
         } catch (_) {
-            // Quota exceeded or other storage error — still return file so upload works
+            try {
+                const { combinedList: existing } = await chrome.storage.session.get(['combinedList']);
+                const list = Array.isArray(existing) ? existing : [];
+                const strip = (e) => ({ filename: e.filename, mimeType: e.mimeType, itemNumber: e.itemNumber, createdAt: e.createdAt });
+                let combinedList = list.map(strip);
+                combinedList.push({ filename: newEntry.filename, mimeType: 'application/pdf', itemNumber: newEntry.itemNumber, createdAt: newEntry.createdAt });
+                if (combinedList.length > 6) combinedList = combinedList.slice(-6);
+                combinedList[combinedList.length - 1].base64 = newEntry.base64;
+                if (combinedList.length >= 2 && list[list.length - 1]?.base64) {
+                    combinedList[combinedList.length - 2].base64 = list[list.length - 1].base64;
+                }
+                await chrome.storage.session.set({ lastCombinedPdf: entry, combinedList });
+            } catch (__) {}
         }
 
         return {
