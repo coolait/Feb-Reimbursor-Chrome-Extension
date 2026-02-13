@@ -1235,14 +1235,9 @@ async function fillForm(values) {
         const processedItems = [];
         
         while (true) {
-            // Check if we should process this item
+            if (itemNumber > 6) break; // Max 6 items (form only has 6 item slots)
             const shouldProcess = (n === 17) || (getValue(values, n) === "Yes");
-            
-            if (!shouldProcess) {
-                break; // No more items to process
-            }
-            
-            // Fill this item (addNewItem is called inside fillItem)
+            if (!shouldProcess) break;
             const itemResult = await fillItem(values, n, itemNumber, firstName, amount);
             processedItems.push(`Item #${itemNumber}: ${itemResult.message}`);
             

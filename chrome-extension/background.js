@@ -310,31 +310,19 @@ async function handleFileCombination(link1, link2, filename) {
             reader.readAsDataURL(combinedBlob);
         });
 
-        // Store for viewing/downloading in popup and viewer page.
-        // Keep a list of recent combined files WITH base64 so user can download any of them.
-        const entry = {
-            base64,
-            filename,
-            mimeType: 'application/pdf'
-        };
-
-        const existing = await chrome.storage.session.get(['combinedList']);
-        let combinedList = Array.isArray(existing.combinedList) ? existing.combinedList : [];
-        combinedList.push({
-            filename,
-            base64,
-            mimeType: 'application/pdf',
-            createdAt: Date.now()
-        });
-        // Keep only the most recent 10 to avoid session storage limits
-        if (combinedList.length > 10) {
-            combinedList = combinedList.slice(combinedList.length - 10);
+        // Store for viewing/downloading in popup (best-effort; don't fail combine if quota exceeded)
+        const entry = { base64, filename, mimeType: 'application/pdf' };
+        try {
+            const existing = await chrome.storage.session.get(['combinedList']);
+            let combinedList = Array.isArray(existing.combinedList) ? existing.combinedList : [];
+            combinedList.push({ filename, base64, mimeType: 'application/pdf', createdAt: Date.now() });
+            if (combinedList.length > 2) {
+                combinedList = combinedList.slice(-2);
+            }
+            await chrome.storage.session.set({ lastCombinedPdf: entry, combinedList });
+        } catch (_) {
+            // Quota exceeded or other storage error — still return file so upload works
         }
-
-        await chrome.storage.session.set({
-            lastCombinedPdf: entry,
-            combinedList
-        });
 
         return {
             success: true,
@@ -378,6 +366,6 @@ async function runFileCombinerTest() {
         return {
             success: false,
             error: `File combiner test failed: ${error.message}`
-        }
+        };
     }
 }
